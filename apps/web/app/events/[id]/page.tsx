@@ -45,7 +45,10 @@ export default async function EventDetailPage({
             eventId={data.event.id}
             initialBreakdown={data.priceBreakdown}
           />
-          <BookingForm eventId={data.event.id} />
+          <BookingForm
+            eventId={data.event.id}
+            remainingTickets={data.event.remainingTickets}
+          />
         </aside>
       </main>
     </div>
