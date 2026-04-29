@@ -8,18 +8,13 @@ import express, {
 } from "express";
 import { sql } from "@repo/database";
 import { calculateEventPrice, toNumber } from "./pricing";
+import { ApiError, asyncRoute } from "./http";
 
 const app: Express = express();
 type SqlRow = Record<string, unknown>;
 
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? true }));
 app.use(express.json());
-
-const asyncRoute =
-  (handler: (req: Request, res: Response) => Promise<void>) =>
-  (req: Request, res: Response, next: NextFunction) => {
-    handler(req, res).catch(next);
-  };
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -57,11 +52,7 @@ app.get(
 app.get(
   "/events/:id",
   asyncRoute(async (req, res) => {
-    const eventId = req.params.id;
-    if (!eventId) {
-      res.status(400).json({ error: "Event id is required" });
-      return;
-    }
+    const eventId = requireString(req.params.id, "Event id is required");
 
     const [event] = await sql`
       select e.*,
@@ -73,8 +64,7 @@ app.get(
     `;
 
     if (!event) {
-      res.status(404).json({ error: "Event not found" });
-      return;
+      throw new ApiError(404, "Event not found", "NOT_FOUND");
     }
 
     const breakdown = calculateEventPrice(
@@ -94,28 +84,27 @@ app.post(
   "/events",
   asyncRoute(async (req, res) => {
     if (process.env.ADMIN_API_KEY && req.header("x-api-key") !== process.env.ADMIN_API_KEY) {
-      res.status(401).json({ error: "Invalid admin API key" });
-      return;
+      throw new ApiError(401, "Invalid admin API key", "UNAUTHORIZED");
     }
 
     const body = req.body as Record<string, unknown>;
-    const basePrice = Number(body.basePrice);
+    const payload = validateEventPayload(body);
     const [event] = await sql`
       insert into events (
         name, date, venue, description, total_tickets, booked_tickets,
         base_price, current_price, floor_price, ceiling_price, pricing_rules
       )
       values (
-        ${String(body.name)}, ${new Date(String(body.date)).toISOString()}::timestamptz, ${String(body.venue)},
-        ${String(body.description ?? "")}, ${Number(body.totalTickets)}, 0,
-        ${basePrice}, ${basePrice}, ${Number(body.floorPrice)}, ${Number(body.ceilingPrice)},
-        ${sql.json(JSON.parse(JSON.stringify(body.pricingRules ?? {})))}
+        ${payload.name}, ${payload.date.toISOString()}::timestamptz, ${payload.venue},
+        ${payload.description}, ${payload.totalTickets}, 0,
+        ${payload.basePrice}, ${payload.basePrice}, ${payload.floorPrice}, ${payload.ceilingPrice},
+        ${sql.json(payload.pricingRules)}
       )
       returning *
     `;
 
     if (!event) {
-      throw new Error("Event creation failed");
+      throw new ApiError(500, "Event creation failed", "INTERNAL_ERROR");
     }
 
     res.status(201).json({ event: serializeEvent(event, toNumber(event.current_price)) });
@@ -125,16 +114,9 @@ app.post(
 app.post(
   "/bookings",
   asyncRoute(async (req, res) => {
-    const { eventId, userEmail, quantity } = req.body as {
-      eventId?: string;
-      userEmail?: string;
-      quantity?: number;
-    };
-
-    if (!eventId || !userEmail || !quantity || quantity < 1) {
-      res.status(400).json({ error: "eventId, userEmail, and quantity are required" });
-      return;
-    }
+    const { eventId, userEmail, quantity } = validateBookingPayload(
+      req.body as Record<string, unknown>,
+    );
 
     const booking = await createBooking({ eventId, userEmail, quantity });
     res.status(201).json({ booking });
@@ -183,16 +165,11 @@ app.get(
 app.get(
   "/analytics/events/:id",
   asyncRoute(async (req, res) => {
-    const eventId = req.params.id;
-    if (!eventId) {
-      res.status(400).json({ error: "Event id is required" });
-      return;
-    }
+    const eventId = requireString(req.params.id, "Event id is required");
 
     const [event] = await sql`select * from events where id = ${eventId}`;
     if (!event) {
-      res.status(404).json({ error: "Event not found" });
-      return;
+      throw new ApiError(404, "Event not found", "NOT_FOUND");
     }
 
     const [metrics] = await sql`
@@ -242,10 +219,33 @@ app.post(
   }),
 );
 
+app.use((_req, _res, next) => {
+  next(new ApiError(404, "Route not found", "NOT_FOUND"));
+});
+
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  const message = error instanceof Error ? error.message : "Unexpected error";
-  const status = message.includes("Not enough tickets") ? 409 : 500;
-  res.status(status).json({ error: message });
+  if (error instanceof ApiError) {
+    res.status(error.status).json({
+      error: error.message,
+      code: error.code,
+      details: error.details,
+    });
+    return;
+  }
+
+  if (error instanceof SyntaxError && "body" in error) {
+    res.status(400).json({
+      error: "Malformed JSON request body",
+      code: "BAD_REQUEST",
+    });
+    return;
+  }
+
+  console.error(error);
+  res.status(500).json({
+    error: "Internal server error",
+    code: "INTERNAL_ERROR",
+  });
 });
 
 export async function createBooking(input: {
@@ -261,12 +261,17 @@ export async function createBooking(input: {
     `;
 
     if (!event) {
-      throw new Error("Event not found");
+      throw new ApiError(404, "Event not found", "NOT_FOUND");
     }
 
     const remaining = Number(event.total_tickets) - Number(event.booked_tickets);
     if (remaining < input.quantity) {
-      throw new Error(`Not enough tickets available. ${remaining} remaining.`);
+      throw new ApiError(
+        409,
+        `Not enough tickets available. ${remaining} remaining.`,
+        "CONFLICT",
+        { remaining },
+      );
     }
 
     const [recent] = await tx`
@@ -294,11 +299,91 @@ export async function createBooking(input: {
     `;
 
     if (!booking) {
-      throw new Error("Booking creation failed");
+      throw new ApiError(500, "Booking creation failed", "INTERNAL_ERROR");
     }
 
     return serializeBooking(booking);
   });
+}
+
+function validateBookingPayload(body: Record<string, unknown>) {
+  const eventId = requireString(body.eventId, "eventId is required");
+  const userEmail = requireEmail(body.userEmail);
+  const quantity = requirePositiveInteger(body.quantity, "quantity");
+
+  return { eventId, userEmail, quantity };
+}
+
+function validateEventPayload(body: Record<string, unknown>) {
+  const name = requireString(body.name, "name is required");
+  const venue = requireString(body.venue, "venue is required");
+  const description =
+    typeof body.description === "string" ? body.description : "";
+  const totalTickets = requirePositiveInteger(body.totalTickets, "totalTickets");
+  const basePrice = requirePositiveNumber(body.basePrice, "basePrice");
+  const floorPrice = requirePositiveNumber(body.floorPrice, "floorPrice");
+  const ceilingPrice = requirePositiveNumber(body.ceilingPrice, "ceilingPrice");
+  const date = new Date(requireString(body.date, "date is required"));
+
+  if (Number.isNaN(date.getTime())) {
+    throw new ApiError(400, "date must be a valid ISO date", "BAD_REQUEST");
+  }
+
+  if (floorPrice > basePrice || basePrice > ceilingPrice) {
+    throw new ApiError(
+      400,
+      "pricing must satisfy floorPrice <= basePrice <= ceilingPrice",
+      "BAD_REQUEST",
+      { floorPrice, basePrice, ceilingPrice },
+    );
+  }
+
+  return {
+    name,
+    venue,
+    description,
+    totalTickets,
+    basePrice,
+    floorPrice,
+    ceilingPrice,
+    date,
+    pricingRules: JSON.parse(JSON.stringify(body.pricingRules ?? {})),
+  };
+}
+
+function requireString(value: unknown, message: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ApiError(400, message, "BAD_REQUEST");
+  }
+
+  return value.trim();
+}
+
+function requireEmail(value: unknown): string {
+  const email = requireString(value, "userEmail is required");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new ApiError(400, "userEmail must be a valid email", "BAD_REQUEST");
+  }
+
+  return email;
+}
+
+function requirePositiveInteger(value: unknown, field: string): number {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 1) {
+    throw new ApiError(400, `${field} must be a positive integer`, "BAD_REQUEST");
+  }
+
+  return numberValue;
+}
+
+function requirePositiveNumber(value: unknown, field: string): number {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    throw new ApiError(400, `${field} must be a positive number`, "BAD_REQUEST");
+  }
+
+  return numberValue;
 }
 
 async function updateCurrentPrice(eventId: string, currentPrice: number) {
