@@ -15,8 +15,9 @@ Run all commands from the repository root:
 ```bash
 pnpm install
 cp .env.example .env
+//create DB : [
 createdb ticketing
-createdb ticketing_test
+createdb ticketing_test]
 pnpm db:push
 pnpm db:seed
 ```
