@@ -1,0 +1,11 @@
+# Design
+
+The platform is split into Turborepo workspaces so the core business rules are not trapped inside either the API or the UI. `packages/pricing-engine` owns deterministic price calculation. It accepts a plain input object containing event inventory, booking velocity, date, configured rules, and environment-derived weights. The formula follows the assignment directly: `basePrice * (1 + sum(weighted adjustments))`, then clamps to the event floor and ceiling. The engine returns both the final price and a rule-level breakdown so the frontend can explain why a price changed without duplicating pricing logic.
+
+`packages/database` owns the Drizzle schema and Postgres connection. Events store capacity, pricing bounds, the last computed `currentPrice`, and JSON pricing rule overrides. Bookings store a snapshot `pricePaid`, which protects historical booking records from later dynamic price changes. The API is an Express TypeScript service in `apps/api`; it keeps route handlers thin and delegates price calculation to the shared package.
+
+The most important consistency decision is in `POST /bookings`. The handler opens a Postgres transaction and selects the target event `FOR UPDATE` before checking remaining tickets. That row lock serializes competing purchase attempts for the same event. If two requests race for the last ticket, the first transaction updates `booked_tickets`; the second transaction resumes after the lock and sees there is no inventory left, then fails with a clear 409 response. The automated API spec includes this exact concurrent booking scenario and runs when a Postgres test URL is available.
+
+The frontend uses Next.js 15 App Router. Event list and detail pages are Server Components that fetch fresh API data. The booking form uses a Server Action, while the detail page has a small client component that polls the event endpoint every 30 seconds for live price updates. This keeps interactivity local and avoids turning the whole page into client-rendered code.
+
+Trade-offs: I kept authentication intentionally small with an optional admin API key, and I did not add Redis because correctness matters more than caching for this assignment. With more time, I would add Drizzle migrations committed to the repo, structured request validation with Zod, richer API error types, and Playwright coverage for the booking UI.
