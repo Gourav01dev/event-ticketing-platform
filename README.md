@@ -6,19 +6,22 @@ A full-stack event ticketing platform with dynamic pricing, built with Turborepo
 
 - Node.js 20 recommended, Node.js 18 minimum
 - pnpm 9
-- Docker, or a local PostgreSQL database
+- Local PostgreSQL database
 
 ## Setup
 
+Run all commands from the repository root:
+
 ```bash
 pnpm install
-docker compose up -d
 cp .env.example .env
+createdb ticketing
+createdb ticketing_test
 pnpm db:push
 pnpm db:seed
 ```
 
-The default `.env.example` points to `postgresql://postgres:postgres@localhost:5432/ticketing`. If you use your own database, update `DATABASE_URL`.
+Update `.env` and `apps/api/.env` with your local PostgreSQL username and password before running DB commands.
 
 ## Run
 
@@ -52,10 +55,12 @@ To run the database-backed API tests explicitly:
 
 ```bash
 cd apps/api
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing_test pnpm test
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing_test pnpm test
 ```
 
 ## Environment Variables
+
+Root `.env.example`:
 
 ```bash
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing
@@ -63,6 +68,19 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing_test
 PORT=3001
 NODE_ENV=development
 NEXT_PUBLIC_API_URL=http://localhost:3001
+ADMIN_API_KEY=dev-admin-key
+TIME_RULE_WEIGHT=1
+DEMAND_RULE_WEIGHT=1
+INVENTORY_RULE_WEIGHT=1
+```
+
+API `apps/api/.env.example`:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ticketing_test
+PORT=3001
+NODE_ENV=development
 ADMIN_API_KEY=dev-admin-key
 TIME_RULE_WEIGHT=1
 DEMAND_RULE_WEIGHT=1
